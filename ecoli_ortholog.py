@@ -1,5 +1,6 @@
-import sys, code, re, string, itertools, cPickle, urllib, lxml, os
-from lxml import etree
+import sys, code, re, string, itertools, cPickle, urllib, lxml, os, signal
+import json
+import lxml.html
 import eventlet                     # easy_install eventlet
 from eventlet.green import urllib2
 from PyQt4.QtCore import *          # yum install PyQt4
@@ -9,7 +10,13 @@ appInstance = QApplication(sys.argv)
 
 class crawler:
     def main(self):
-        self.fetch_organism_list()
+        try:
+            os.stat('cache/ecoliNames')
+            self.ecoliNames = json.loads(open('cache/ecoliNames','r').read())
+            print "Found %i cached E. Coli names"%len(self.ecoliNames)
+            self.fetch_pairwise_orthologs()
+        except OSError:
+            self.fetch_organism_list()
 
     def fetch_organism_list(self):
         self.webpage = QWebPage()
@@ -35,6 +42,7 @@ class crawler:
         ecoliP = lambda s: re.search('Escherichia',s) != None
         self.ecoliNames = filter(ecoliP, self.organismNames)
         print "Found %i species of E. Coli."%len(self.ecoliNames)
+        open('cache/ecoliNames','w').write(json.dumps(self.ecoliNames))
         self.fetch_pairwise_orthologs()
 
     def fetch_pairwise_orthologs(self):
@@ -57,6 +65,10 @@ class crawler:
 
     def fetch_pair(self, (lSpecies, rSpecies)):
         print '-------------- %s ------------'%self.cache_name(lSpecies,rSpecies)
+        # First grab the session ID with a GET request
+        response = urllib2.urlopen('http://roundup.hms.harvard.edu/retrieve/').read()
+        rtree = lxml.html.document_fromstring(response)
+        key = rtree.xpath('//input[@name="csrfmiddlewaretoken"]/@value')[0]
         params = []
         params.append(('genomes_filter','E'))
         params.append(('genomes_filter','B'))
@@ -67,23 +79,19 @@ class crawler:
         params.append(('evalue','1e-5'))
         params.append(('distance_lower_limit',''))
         params.append(('distance_upper_limit',''))
+        params.append(('csrfmiddlewaretoken',key))
         loc = 'http://roundup.hms.harvard.edu/retrieve/'
         dat = urllib.urlencode(params)
-        # First grab the session ID with a GET request
-        # We have to use Qt again because etree barfs on 0x2c
-        # UPDATE: no run loop integration for Qt, green trees :(
-        # wp = QWebPage()
-        # callback = lambda success: self.fetch_pair_2(wp, success, lSpecies, rSpecies)
-        # wp.loadFinished.connect(callback)
-        # wp.mainFrame().load(QUrl('http://roundup.hms.harvard.edu/retrieve/'))
-        response = urllib2.urlopen('http://roundup.hms.harvard.edu/retrieve/').read()
-        parser = etree.XMLParser(recover=True)
-        rtree = etree.fromstring(response, parser)
-        key = rtree.find('input[@id=csrfmiddlewaretoken]').attrib['value']
-        print "(%s,%s): %s"%(lSpecies,rSpecies,key)
-        
-        
-
+        hdrs = {}
+        hdrs['User-Agent'] = 'Mozilla/5.0 (X11; U; Linux i686) Gecko/20071127 Firefox/2.0.0.11'
+        hdrs['Referrer'] = 'http://roundup.hms.harvard.edu/retrieve/'
+        hdrs['Cookie'] = 'csrftoken='+key
+        req = urllib2.Request('http://roundup.hms.harvard.edu/retrieve/', data=dat, headers=hdrs)
+        response = urllib2.urlopen(req).read()
+            
+        print response
+        exit(0)
+    
 
     def fetch_pair_2(self, success, webpage, lSpecies, rSpecies):
         key_query = 'input#csrfmiddlewaretoken'
@@ -93,6 +101,7 @@ class crawler:
         # Then 
         #response = urllib2.urlopen(loc, dat).read()
 
+signal.signal(signal.SIGINT, lambda a,b: exit(0))
 c = crawler()
 c.main()
 appInstance.exec_()
