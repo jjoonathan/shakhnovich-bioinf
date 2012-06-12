@@ -10,28 +10,10 @@ from PyQt4.QtGui import *
 from PyQt4.QtWebKit import QWebPage
 appInstance = QApplication(sys.argv)
 
-class Protein:
-    instances={}
-    @classmethod
-    def withID(self, protID):
-        try:
-            return Protein.instances[protID]
-        except KeyError:
-            return Protein(protID)
-    def __init__(self, protID):
-        self.name = protID
-        self.orthologs = {}  # Protein -> distance
-        Protein.instances[protID]=self
-    def __cmp__(self, other):
-        return self.name.__cmp__(other)
-    def __str__(self):
-        return '<Protein %s>'%self.name
-    def __hash__(self):
-        return self.name.__hash__()
-    def __repr__(self):
-        return 'Protein.withId(%s)'%self.name
-
 class Crawler:
+    geneToOrthologs = {}
+    geneToSpecies = {}
+    geneFamilies = None  # A list of sets containing the proteins in that family
     def main(self):
         try:
             os.stat('cache/ecoliNames')
@@ -43,7 +25,10 @@ class Crawler:
         if not self.load_gene_list():
             self.construct_gene_list()
             self.save_gene_list()
-        self.print_gene_families()
+        if self.geneFamilies == None:
+            self.find_gene_families()
+            self.save_gene_list()
+        self.output_gene_families()
 
     def fetch_organism_list(self):
         self.webpage = QWebPage()
@@ -75,7 +60,7 @@ class Crawler:
     def fetch_uncached_orthologs(self):
         self.downloader_pool = eventlet.greenpool.GreenPool(size=5)
         pairs_to_download = []
-        combs = len(self.ecoliNames)*(len(self.ecoliNames)-1)
+        combs = len(self.ecoliNames)*(len(self.ecoliNames)-1)/2
         print "That's %i species-species combinations."%combs
         for (l,r) in itertools.combinations(self.ecoliNames,2):
             try:
@@ -145,7 +130,7 @@ class Crawler:
             self.add_genes_to_list(l,r)
             thispercent = int(((i+1)*100)//total)
             if True:
-                print "%i%% (%i/%i)"%(thispercent, i, total)
+                print "%i%% (%i/%i)"%(thispercent, i+1, total)
                 lastpercent = thispercent
 
     def add_genes_to_list(self, lSpecies, rSpecies):
@@ -153,25 +138,31 @@ class Crawler:
         fcontents = open(fname,'r').read()
         tree = lxml.etree.fromstring(fcontents)
         idnumToProt = {}
-        for geneElmt in tree.xpath('//*[local-name()="gene"]'):
-            prt = Protein.withID(geneElmt.get('protId'))
-            idnumToProt[geneElmt.get('id')] = prt
+        for speciesElmt in tree.xpath('//*[local-name()="species"]'):
+            species_name = speciesElmt.get('name')
+            for geneElmt in speciesElmt.xpath('//*[local-name()="gene"]'):
+                prtId = geneElmt.get('protId')
+                if prtId not in self.geneToOrthologs:
+                    self.geneToOrthologs[prtId] = {}
+                self.geneToSpecies[prtId] = species_name
+                idnumToProt[geneElmt.get('id')] = prtId
         for edgeElmt in tree.xpath('//*[local-name()="orthologGroup"]'):
             dist = float(edgeElmt.xpath('./*[local-name()="score"]/@value')[0])
             ids = edgeElmt.xpath('*[local-name()="geneRef"]/@id')
             proteins = map(lambda idno: idnumToProt[idno], ids)
             for p1 in proteins:
                 for p2 in proteins:
-                    p1.orthologs[p2] = dist
+                    if p1 == p2:
+                        continue
+                    self.geneToOrthologs[p1][p2] = dist
+                    self.geneToOrthologs[p2][p1] = dist
 
     def save_gene_list(self):
-        storedict = {}
-        for name, prot in Protein.instances.iteritems():
-            orthologs = {}
-            for o,dist in prot.orthologs.iteritems():
-                orthologs[o.name] = dist
-            storedict[name] = orthologs
-        open('cache/genelist.json','w').write(cjson.encode(storedict))
+        save_dict = {'geneToOrthologs' : self.geneToOrthologs}
+        save_dict['geneToSpecies'] = self.geneToSpecies
+        if self.geneFamilies != None:
+            save_dict['geneFamilies'] = map(list,self.geneFamilies)
+        open('cache/genelist.json','w').write(cjson.encode(save_dict))
 
     def load_gene_list(self):
         try:
@@ -179,38 +170,96 @@ class Crawler:
             print "Loading cached gene list..."
             stored_list = f.read()
         except IOError:
-            return false
+            return False
         print "Decoding gene list..."
-        raw_genelist = cjson.decode(stored_list)
-        print "Initializing gene data structures..."
-        del stored_list
-        for name in raw_genelist.iterkeys():
-            Protein.withID(name)  # initalize all the objects
-        for name, edges in raw_genelist.iteritems():
-            prt = Protein.withID(name)
-            for ortholog, distance in edges.iteritems():
-                prt.orthologs[Protein.withID(ortholog)] = distance
-        print "Done initializing gene data structures."
-                              
-            
+        save_dict = cjson.decode(stored_list)
+        self.geneToOrthologs = save_dict['geneToOrthologs']
+        self.geneToSpecies = save_dict['geneToSpecies']
+        self.geneFamilies = save_dict.get('geneFamilies',None)
+        if self.geneFamilies != None:
+            for i in xrange(len(self.geneFamilies)):
+                self.geneFamilies[i] = set(self.geneFamilies[i])
+        return True
 
-        
-
-    def print_gene_families(self):
-        print "Printing gene families"
-        proteins = set(Protein.instances.iterkeys())
+    def find_gene_families(self):
+        print "Determining gene families..."
+        self.geneFamilies = []
+        proteins = set(self.geneToOrthologs.iterkeys())
         while proteins:
             # Build up the protein family
             visitedMembers = set()
-            unvisitedMembers = set((proteins.pop()))
+            unvisitedMembers = set((proteins.pop(),))
             while unvisitedMembers:
                 mbr = unvisitedMembers.pop()
                 visitedMembers.add(mbr)
-                for child in mbr.orthologs.iterkeys():
+                for child in self.geneToOrthologs[mbr].iterkeys():
                     if child not in visitedMembers:
                         unvisitedMembers.add(child)
+                        proteins.discard(child)
             family = visitedMembers
-            print 'Family: %s'%family
+            self.geneFamilies.append(family)
+        # print "Checking consistency of gene families..."
+        # for i in xrange(len(self.geneFamilies)):
+        #     for j in xrange(len(self.geneFamilies)):
+        #         gf1, gf2 = self.geneFamilies[i], self.geneFamilies[j]
+        #         if gf1==gf2:
+        #             continue
+        #         for g in gf1:
+        #             if g in gf2:
+        #                 print "%s in %s and %s"%(g, gf1, gf2)
+        #                 code.interact(None,None,locals())
+        # print "Gene families determined to be consistent."
+        
+
+    def output_gene_families(self):
+        print "Writing output..."
+        col0_head = 'Family#'
+        col0_width = max(len(col0_head)+4, len(str(len(self.geneFamilies)+4)))
+        col_widths = []
+        species_name_to_col_no = {}
+        fout = open('gene_families.txt','w')
+        fout.write(col0_head.ljust(col0_width))
+        # Print header
+        for i in xrange(len(self.ecoliNames)):
+            species_name = self.ecoliNames[i]
+            species_name_to_col_no[species_name] = i
+            col_width = len(self.ecoliNames[i])+4
+            col_widths.append(col_width)
+            fout.write(species_name.rjust(col_width))
+        num_species = len(col_widths)
+        # Loop through each family
+        lastPercentDone = -1
+        num_families = len(self.geneFamilies)
+        for familyNum in xrange(num_families):
+            currentPercentDone = int(familyNum*100/num_families)
+            if currentPercentDone != lastPercentDone:
+                lastPercentDone = currentPercentDone
+                print "%i%% (%i/%i)"%(currentPercentDone, familyNum, num_families)
+            fout.write('\n'+str(familyNum).ljust(col0_width))
+            family = self.geneFamilies[familyNum]
+            genes = []
+            # Sort genes into (index, species) cells
+            for g in self.geneFamilies:
+                genes.append(set())
+            for g in family:
+                species_name = self.geneToSpecies[g]
+                genes[species_name_to_col_no[species_name]].add(g)
+            genes = map(list, genes)
+            max_genes_in_species = 0
+            for gset in genes:
+                max_genes_in_species = max(max_genes_in_species, len(gset))
+            # Print out the cells
+            for j in xrange(max_genes_in_species):
+                if j!=0:
+                    fout.write(' '*col0_width)
+                for i in xrange(num_species):
+                    try:
+                        fout.write(genes[i][j].rjust(col_widths[i]))
+                    except IndexError:
+                        fout.write(' '*col_widths[i])
+                fout.write('\n')
+            fout.write('\n')
+                
         
 
 signal.signal(signal.SIGINT, lambda a,b: exit(0))
