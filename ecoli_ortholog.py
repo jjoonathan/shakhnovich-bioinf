@@ -1,5 +1,5 @@
-import sys, code, re, string, itertools, cPickle, urllib, lxml, os, signal
-import cookielib
+import sys, code, re, string, itertools, cPickle, urllib, lxml
+import cookielib, time, os, signal
 import lxml.html
 import lxml.etree
 import cjson                        # easy_install python-cjson
@@ -14,6 +14,7 @@ class Crawler:
     geneToOrthologs = {}
     geneToSpecies = {}
     geneFamilies = None  # A list of sets containing the proteins in that family
+    targetSpecies = None
     def main(self):
         try:
             os.stat('cache/ecoliNames')
@@ -22,6 +23,9 @@ class Crawler:
             self.fetch_uncached_orthologs()
         except OSError:
             self.fetch_organism_list()
+            while self.targetSpecies == None:
+                time.sleep(.05)
+                appInstance.processEvents()
         if not self.load_gene_list():
             self.construct_gene_list()
             self.save_gene_list()
@@ -29,6 +33,7 @@ class Crawler:
             self.find_gene_families()
             self.save_gene_list()
         self.output_gene_families()
+        exit(0)
 
     def fetch_organism_list(self):
         self.webpage = QWebPage()
@@ -52,17 +57,17 @@ class Crawler:
             elmt = elmt.nextSibling()
         print "Found %i organisms."%len(self.organismNames)
         ecoliP = lambda s: re.search('Escherichia',s) != None
-        self.ecoliNames = filter(ecoliP, self.organismNames)
-        print "Found %i species of E. Coli."%len(self.ecoliNames)
-        open('cache/ecoliNames','w').write(cjson.encode(self.ecoliNames))
+        self.targetSpecies = filter(ecoliP, self.organismNames)
+        print "Found %i species of E. Coli."%len(self.targetSpecies)
+        open('cache/targetSpecies','w').write(cjson.encode(self.targetSpecies))
         self.fetch_uncached_orthologs()
 
     def fetch_uncached_orthologs(self):
         self.downloader_pool = eventlet.greenpool.GreenPool(size=5)
         pairs_to_download = []
-        combs = len(self.ecoliNames)*(len(self.ecoliNames)-1)/2
+        combs = len(self.targetSpecies)*(len(self.targetSpecies)-1)/2
         print "That's %i species-species combinations."%combs
-        for (l,r) in itertools.combinations(self.ecoliNames,2):
+        for (l,r) in itertools.combinations(self.targetSpecies,2):
             try:
                 os.stat('cache/%s.xml'%self.cache_name(l,r))
             except OSError:
@@ -97,7 +102,7 @@ class Crawler:
         params.append(('genome_choices','Escherichia coli 536'))
         params.append(('genomes', '%s\r\n%s\r\n'%(lSpecies,rSpecies)))
         params.append(('divergence','0.8'))
-        params.append(('evalue','1e-5'))
+        params.append(('evalue','1e-20'))
         params.append(('distance_lower_limit',''))
         params.append(('distance_upper_limit',''))
         loc = 'http://roundup.hms.harvard.edu/retrieve/'
@@ -122,7 +127,7 @@ class Crawler:
 
     def construct_gene_list(self):
         print "Creating global gene list..."
-        allpairs = list(itertools.combinations(self.ecoliNames,2))
+        allpairs = list(itertools.combinations(self.targetSpecies,2))
         lastpercent = -1
         total = len(allpairs)
         for i in xrange(len(allpairs)):
@@ -162,11 +167,11 @@ class Crawler:
         save_dict['geneToSpecies'] = self.geneToSpecies
         if self.geneFamilies != None:
             save_dict['geneFamilies'] = map(list,self.geneFamilies)
-        open('cache/genelist.json','w').write(cjson.encode(save_dict))
+        open('genemaps.json','w').write(cjson.encode(save_dict))
 
     def load_gene_list(self):
         try:
-            f = open('cache/genelist.json')
+            f = open('genemaps.json')
             print "Loading cached gene list..."
             stored_list = f.read()
         except IOError:
@@ -213,29 +218,24 @@ class Crawler:
 
     def output_gene_families(self):
         print "Writing output..."
-        col0_head = 'Family#'
-        col0_width = max(len(col0_head)+4, len(str(len(self.geneFamilies)+4)))
-        col_widths = []
         species_name_to_col_no = {}
         fout = open('gene_families.txt','w')
-        fout.write(col0_head.ljust(col0_width))
+        fout.write('Family#\t')
         # Print header
-        for i in xrange(len(self.ecoliNames)):
-            species_name = self.ecoliNames[i]
+        for i in xrange(len(self.targetSpecies)):
+            species_name = self.targetSpecies[i]
             species_name_to_col_no[species_name] = i
-            col_width = len(self.ecoliNames[i])+4
-            col_widths.append(col_width)
-            fout.write(species_name.rjust(col_width))
-        num_species = len(col_widths)
+            fout.write(species_name+'\t')
         # Loop through each family
         lastPercentDone = -1
         num_families = len(self.geneFamilies)
+        num_species = len(self.targetSpecies)
         for familyNum in xrange(num_families):
             currentPercentDone = int(familyNum*100/num_families)
             if currentPercentDone != lastPercentDone:
                 lastPercentDone = currentPercentDone
                 print "%i%% (%i/%i)"%(currentPercentDone, familyNum, num_families)
-            fout.write('\n'+str(familyNum).ljust(col0_width))
+            fout.write('\n%s\t'%str(familyNum))
             family = self.geneFamilies[familyNum]
             genes = []
             # Sort genes into (index, species) cells
@@ -251,12 +251,12 @@ class Crawler:
             # Print out the cells
             for j in xrange(max_genes_in_species):
                 if j!=0:
-                    fout.write(' '*col0_width)
+                    fout.write('\t')
                 for i in xrange(num_species):
                     try:
-                        fout.write(genes[i][j].rjust(col_widths[i]))
+                        fout.write(genes[i][j]+'\t')
                     except IndexError:
-                        fout.write(' '*col_widths[i])
+                        fout.write('\t')
                 fout.write('\n')
             fout.write('\n')
                 
@@ -265,5 +265,3 @@ class Crawler:
 signal.signal(signal.SIGINT, lambda a,b: exit(0))
 c = Crawler()
 c.main()
-appInstance.exec_()
-# code.interact('', None, locals())
