@@ -1,6 +1,6 @@
 import sys, code, re, string, itertools, cPickle, urllib, lxml
 import cookielib, time, os, signal
-import lxml.html
+import lxml.html                    # easy_install lxml
 import lxml.etree
 import cjson                        # easy_install python-cjson
 import eventlet                     # easy_install eventlet
@@ -102,7 +102,7 @@ class Crawler:
         params.append(('genome_choices','Escherichia coli 536'))
         params.append(('genomes', '%s\r\n%s\r\n'%(lSpecies,rSpecies)))
         params.append(('divergence','0.8'))
-        params.append(('evalue','1e-20'))
+        params.append(('evalue','1e-5'))
         params.append(('distance_lower_limit',''))
         params.append(('distance_upper_limit',''))
         loc = 'http://roundup.hms.harvard.edu/retrieve/'
@@ -145,7 +145,7 @@ class Crawler:
         idnumToProt = {}
         for speciesElmt in tree.xpath('//*[local-name()="species"]'):
             species_name = speciesElmt.get('name')
-            for geneElmt in speciesElmt.xpath('//*[local-name()="gene"]'):
+            for geneElmt in speciesElmt.xpath('.//*[local-name()="gene"]'):
                 prtId = geneElmt.get('protId')
                 if prtId not in self.geneToOrthologs:
                     self.geneToOrthologs[prtId] = {}
