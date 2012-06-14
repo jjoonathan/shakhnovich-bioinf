@@ -1,5 +1,5 @@
 import sys, code, re, string, itertools, cPickle, urllib, lxml
-import cookielib, time, os, signal
+import cookielib, time, os, signal, random
 import lxml.html                    # easy_install lxml
 import lxml.etree
 import cjson                        # easy_install python-cjson
@@ -13,6 +13,7 @@ appInstance = QApplication(sys.argv)
 class Crawler:
     geneToOrthologs = {}
     geneToSpecies = {}
+    geneSequences = {}
     geneFamilies = None  # A list of sets containing the proteins in that family
     targetSpecies = None
     def main(self):
@@ -32,7 +33,9 @@ class Crawler:
         if self.geneFamilies == None:
             self.find_gene_families()
             self.save_gene_list()
-        self.output_gene_families()
+        if not os.path.isfile('gene_families.txt'):
+            self.output_gene_families()
+        self.fetch_gene_sequences()
         exit(0)
 
     def fetch_organism_list(self):
@@ -227,14 +230,11 @@ class Crawler:
             species_name_to_col_no[species_name] = i
             fout.write(species_name+'\t')
         # Loop through each family
-        lastPercentDone = -1
         num_families = len(self.geneFamilies)
         num_species = len(self.targetSpecies)
         for familyNum in xrange(num_families):
-            currentPercentDone = int(familyNum*100/num_families)
-            if currentPercentDone != lastPercentDone:
-                lastPercentDone = currentPercentDone
-                print "%i%% (%i/%i)"%(currentPercentDone, familyNum, num_families)
+            sys.stdout.write("%i%% (%i/%i)\x1B[1G"%(int(familyNum*100.0/num_families), familyNum, num_families))
+            sys.stdout.flush()
             fout.write('\n%s\t'%str(familyNum))
             family = self.geneFamilies[familyNum]
             genes = []
@@ -259,6 +259,28 @@ class Crawler:
                         fout.write('\t')
                 fout.write('\n')
             fout.write('\n')
+
+    def fetch_gene_sequences(self):
+        print "Fetching family FASTA files..."
+        try:
+            self.geneSequences = cjson.decode(open('gene_sequences.json').read())
+        except:
+            self.geneSequences = {}
+        genes_to_fetch = set(self.geneToSpecies.iterkeys())-set(self.geneSequences.iterkeys())
+        if len(genes_to_fetch) == 0:
+            return
+        prng = random.Random()
+        def fetch_gene(g):
+            response = urllib2.urlopen('http://www.uniprot.org/batch/%s.fasta'%g)
+            self.geneSequences[g] = response.read()
+        downloader_pool = eventlet.greenpool.GreenPool(size=5)
+        i=0
+        for g in downloader_pool.imap(fetch_gene, genes_to_fetch):
+            i += 1
+            if i == len(genes_to_fetch) or prng.uniform(0,1)<(1.0/i):
+                open('gene_sequences.json','w').write(cjson.encode(self.geneSequences))
+            print "%i%% (%i/%i)\1B[1G"%(i*100.0/len(genes_to_fetch), i, len(genes_to_fetch))
+            
                 
         
 
