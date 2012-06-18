@@ -1,5 +1,6 @@
 import sys, code, re, string, itertools, cPickle, urllib, lxml
 import cookielib, time, os, signal, random, traceback, subprocess
+import select
 import lxml.html                    # easy_install lxml
 import lxml.etree
 import cjson                    
@@ -27,6 +28,7 @@ def bridges(species1_names, species2_names):
 #   <run_name>/roundup/subspeciesA---subspeciesB.xml    //raw cache of roundup response
 #   <run_name>/genemaps.json         // keys: geneToSpecies, geneToOrthologs, geneFamilies 
 #   <run_name>/gene_sequences.json   // flat: gene_name -> gene seq in FASTA format+'\n'
+#   <run_name>/gene_families.json   // flat: gene_name -> gene seq in FASTA format+'\n'
 #   <run_name>/clustalin/92347894    // unaligned gene family input
 #   <run_name>/clustalout/09833900   // aligned gene family output
 
@@ -43,13 +45,17 @@ class Crawler:
     def main(self):
         if not os.path.isdir(run_name):
             os.mkdir(run_name)
+	if not os.path.isdir(run_name+'/clustalin'):
             os.mkdir(run_name+'/clustalin')
+	if not os.path.isdir(run_name+'/clustalout'):
             os.mkdir(run_name+'/clustalout')
+	if not os.path.isdir(run_name+'/roundup'):
+            os.mkdir(run_name+'/roundup')
         self.load_species_names_list()
         self.fetch_uncached_orthologs()
         self.load_gene_list()
         self.find_gene_families()
-        self.output_gene_families()
+        # self.output_gene_families()
         self.fetch_gene_sequences()
         self.align_and_test_families()
         exit(0)
@@ -328,11 +334,11 @@ class Crawler:
                 self.geneSequences[g] = response.read()
             except urllib2.HTTPError as e:
                 print "Error '%s'->%i"%(fetchurl,e.code)
-        downloader_pool = eventlet.greenpool.GreenPool(size=8)
+        downloader_pool = eventlet.greenpool.GreenPool(size=16)
         i=0
         for g in downloader_pool.imap(fetch_gene, genes_to_fetch):
             i += 1
-            if i == len(genes_to_fetch) or prng.uniform(0,1)<.001:
+            if i == len(genes_to_fetch) or i%1000 == 0:
                 fname='%s/gene_sequences.json'%run_name
                 if os.path.isfile(fname):
                     os.rename(fname,fname+'_old')
@@ -345,6 +351,7 @@ class Crawler:
             
 ############################################# clustal #############################################               
     def align_and_test_families(self):
+        print "Aligning families..."
         num_families = len(self.geneFamilies)
         n_values = {}  # gene family id -> number of genes in family of species1 origin
         stderr = open('%s/clustal_stderr.txt'%run_name,'w')
@@ -361,27 +368,32 @@ class Crawler:
             sys.stdout.flush()
             ifname = '%s/clustalin/%s.fasta'%(run_name,familyid)
             ofname = '%s/clustalout/%s.fasta'%(run_name,familyid)
-            if not os.path.isfile(ifname):
-                s1,s2 = [],[]
-                for g in family:  # Sort the genes into species1, species2 buckets
-                    s = self.geneToSpecies[g]
-                    if s in self.species1Names:
-                        s1.append(g)
-                    else:
-                        s2.append(g)
-                if len(s1)>0 and len(s2)>0:
-                    print '%i:%i family'%(len(s1),len(s2))
-                if len(s1)<10 or len(s2)<10:
-                    continue
-                clustal_inpt_f = open(ifname,'w')
-                for g in itertools.chain(s1,s2):
-                    clustal_inpt_f.write(self.geneSequences[g])
-                clustal_inpt_f.close()
-                args = ('clustalw2','-INFILE='+ifname,'-OUTFILE='+ofname,'-OUTPUT=FASTA')
-                PIPE = subprocess.PIPE
-                proc = subprocess.Popen(args, stdin=PIPE, stdout=PIPE, stderr=stderr)
-                proc.wait()
-            n_values[familyid] = len(s1)
+            if os.path.isfile(ofname):
+                continue
+            s1,s2 = [],[]
+            for g in family:  # Sort the genes into species1, species2 buckets
+                s = self.geneToSpecies[g]
+                if s in self.species1Names:
+                    s1.append(g)
+                else:
+                    s2.append(g)
+            if len(s1)<10 or len(s2)<10:
+                continue
+            # print '+%i:%i family'%(len(s1),len(s2))
+            clustal_inpt_f = open(ifname,'w')
+            for g in itertools.chain(s1,s2):
+                clustal_inpt_f.write(self.geneSequences[g])
+            clustal_inpt_f.close()
+            args = ('clustalw2','-INFILE='+ifname,'-OUTFILE='+ofname,'-OUTPUT=FASTA')
+            try:
+                pass
+                # subprocess.call(args)
+            except OSError as e:
+                print "clustalw2 terminated: %s"%e
+            # PIPE = subprocess.PIPE
+            # proc = subprocess.Popen(args, stdin=PIPE, stdout=PIPE, stderr=stderr)
+            # proc.wait()
+            n_values[str(familyid)] = len(s1)
             if i%10 == 0:
                 fname = run_name+'/n_values.json'
                 if os.path.isfile(fname):
@@ -390,6 +402,7 @@ class Crawler:
                     os.unlink(fname+'_old')
                 else:
                     open(run_name+'/n_values.json','w').write(cjson.encode(n_values))
+        print "All family alignments processed."
             
 def ctrlc(a,b):
     traceback.print_stack()
