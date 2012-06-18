@@ -1,8 +1,9 @@
 import sys, code, re, string, itertools, cPickle, urllib, lxml
-import cookielib, time, os, signal, random
+import cookielib, time, os, signal, random, traceback, subprocess
 import lxml.html                    # easy_install lxml
 import lxml.etree
-import cjson                        # easy_install python-cjson
+import cjson                    
+    # easy_install python-cjson
 import eventlet                     # easy_install eventlet
 from eventlet.green import urllib2
 from PyQt4.QtCore import *          # yum install PyQt4
@@ -38,6 +39,7 @@ class Crawler:
     species1Names = None
     species2Names = None
     speciesPairs = []
+    malformedXMLFiles = []
     def main(self):
         if not os.path.isdir(run_name):
             os.mkdir(run_name)
@@ -49,6 +51,7 @@ class Crawler:
         self.find_gene_families()
         self.output_gene_families()
         self.fetch_gene_sequences()
+        self.align_and_test_families()
         exit(0)
 
 ############################################# load_species_name_list #############################################
@@ -90,22 +93,28 @@ class Crawler:
         self.downloader_pool = eventlet.greenpool.GreenPool(size=5)
         self.pairs_to_download = []
         bridge_pairs = bridges(self.species1Names, self.species2Names)
+        print "Bridges:\n\t%s"%('\n\t'.join(itertools.starmap(self.cache_name, bridge_pairs)))
         combs1 = len(self.species1Names)*(len(self.species1Names)-1)/2
         combs2 = len(self.species2Names)*(len(self.species2Names)-1)/2
-        self.pairs_to_download.extend(bridge_pairs)
+        self.speciesPairs.extend(bridge_pairs)
         self.speciesPairs.extend(itertools.combinations(self.species1Names,2))
         self.speciesPairs.extend(itertools.combinations(self.species2Names,2))
         print "That's %i combinations of species1, %i of species2, %i bridges."%(combs1,combs2,len(bridge_pairs))
-        for (l,r) in self.speciesPairs:
-            if os.path.isfile('%s/roundup/%s.xml'%(run_name,self.cache_name(l,r))):
-                speciesPairs.append((l,r))
-        num_to_dl = len(self.speciesPairs)
+        numPairs = len(self.speciesPairs)
+        for i in xrange(numPairs):
+            l,r = self.speciesPairs[i]
+            if i%20 == 0:
+                print "%i%% (%i/%i)\x1B[1F"%(int(i*100.0/numPairs),i,numPairs)
+            if not os.path.isfile('%s/roundup/%s.xml'%(run_name,self.cache_name(l,r))):
+                self.pairs_to_download.append((l,r))
+        num_to_dl = len(self.pairs_to_download)
         print "Fetching %i uncached combinations of species..."%num_to_dl
-        pdp = self.downloader_pool.imap(self.fetch_pair, self.speciesPairs)
+        pdp = self.downloader_pool.imap(self.fetch_pair, self.pairs_to_download)
         i=0
         for response in pdp:
             i+=1
-            print "%i%% (%i/%i)\x1B[1F"%(int(i*100.0/num_to_dl), i, num_to_dl)
+            cachename = self.cache_name(*response)
+            print "%i%% (%i/%i): %s\x1B[1F"%(int(i*100.0/num_to_dl), i, num_to_dl, cachename)
 
     def cache_name(self, lSpecies, rSpecies):
         name = lSpecies+'---'+rSpecies
@@ -114,6 +123,15 @@ class Crawler:
         return filename
 
     def fetch_pair(self, (lSpecies, rSpecies)):
+        while True:
+            try:
+                self.attempt_fetch_pair((lSpecies,rSpecies))
+                break
+            except urllib2.URLError as e:
+                print "Error fetching (%s,%s): %s"%(lSpecies,rSpecies,e)
+        return (lSpecies,rSpecies)
+
+    def attempt_fetch_pair(self, (lSpecies, rSpecies)):
         # First grab the CSRF, cookies with a GET request
         cjar = cookielib.CookieJar()
         opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(cjar))
@@ -175,17 +193,28 @@ class Crawler:
     def construct_gene_list(self):
         print "Creating global gene list..."
         lastpercent = -1
-        total = len(allpairs)
-        for i in xrange(len(allpairs)):
-            l, r = allpairs[i]
+        total = len(self.speciesPairs)
+        for i in xrange(len(self.speciesPairs)):
+            l, r = self.speciesPairs[i]
             self.add_genes_to_list(l,r)
             if True:
                 print "%i%% (%i/%i)\x1B[1F"%(int(((i+1)*100)//total), i+1, total)
+        if self.malformedXMLFiles:
+            for f in self.malformedXMLFiles:
+                os.unlink(f)
+            print "Malformed XML files purged. Please run script again."
+            exit(0)
+                
 
     def add_genes_to_list(self, lSpecies, rSpecies):
         fname = '%s/roundup/%s.xml'%(run_name,self.cache_name(lSpecies,rSpecies))
         fcontents = open(fname,'r').read()
-        tree = lxml.etree.fromstring(fcontents)
+        try:
+            tree = lxml.etree.fromstring(fcontents)
+        except lxml.etree.XMLSyntaxError:
+            print "Problem with file '%s'."%fname
+            self.malformedXMLFiles.append(fname)
+            return
         idnumToProt = {}
         for speciesElmt in tree.xpath('//*[local-name()="species"]'):
             species_name = speciesElmt.get('name')
@@ -289,11 +318,16 @@ class Crawler:
             self.geneSequences = {}
         genes_to_fetch = set(self.geneToSpecies.iterkeys())-set(self.geneSequences.iterkeys())
         if len(genes_to_fetch) == 0:
+            print "All genes already fetched."
             return
         prng = random.Random()
         def fetch_gene(g):
-            response = urllib2.urlopen('http://www.uniprot.org/batch/%s.fasta'%g)
-            self.geneSequences[g] = response.read()
+            fetchurl = 'http://www.uniprot.org/uniprot/%s.fasta'%g
+            try:
+                response = urllib2.urlopen(fetchurl)
+                self.geneSequences[g] = response.read()
+            except urllib2.HTTPError as e:
+                print "Error '%s'->%i"%(fetchurl,e.code)
         downloader_pool = eventlet.greenpool.GreenPool(size=8)
         i=0
         for g in downloader_pool.imap(fetch_gene, genes_to_fetch):
@@ -306,35 +340,43 @@ class Crawler:
                     os.unlink(fname+'_old')
                 else:
                     open(fname,'w').write(cjson.encode(self.geneSequences))
-            print "%i%% (%i/%i)\1B[1F"%(i*100.0/len(genes_to_fetch), i, len(genes_to_fetch))
+            print "%i%% (%i/%i)\x1B[1F"%(i*100.0/len(genes_to_fetch), i, len(genes_to_fetch))
+        print "Done."
             
 ############################################# clustal #############################################               
     def align_and_test_families(self):
         num_families = len(self.geneFamilies)
         n_values = {}  # gene family id -> number of genes in family of species1 origin
         stderr = open('%s/clustal_stderr.txt'%run_name,'w')
+        if not os.path.isdir(run_name+'/clustalin'):
+            os.mkdir(run_name+'/clustalin')
+        if not os.path.isdir(run_name+'/clustalout'):
+            os.mkdir(run_name+'/clustalout')
+       
         for i in xrange(num_families):
-            family = self.geneFamilies[i]
+            family = list(self.geneFamilies[i])
             family.sort()
             familyid = repr(family).__hash__()
             sys.stdout.write("%i%% (%i/%i)\x1B[1G"%(int(i*100.0/num_families), i, num_families))
             sys.stdout.flush()
-            ifname = '%s/clustalin/%s'%(run_name,famiyid)
-            ofname = '%s/clustalout/%s'%(run_name,famiyid)
+            ifname = '%s/clustalin/%s.fasta'%(run_name,familyid)
+            ofname = '%s/clustalout/%s.fasta'%(run_name,familyid)
             if not os.path.isfile(ifname):
+                s1,s2 = [],[]
                 for g in family:  # Sort the genes into species1, species2 buckets
-                    s1 = []
-                    s2 = []
                     s = self.geneToSpecies[g]
                     if s in self.species1Names:
                         s1.append(g)
                     else:
                         s2.append(g)
-                if len(s1)>10 and len(s2)>10:
-                    clustal_inpt_f = open(ifname,'w')
-                    for g in itertools.chain(s1,s2):
-                        clustal_inpt_f.write(self.geneSequences[g])
-                    clustal_inpt_f.close()
+                if len(s1)>0 and len(s2)>0:
+                    print '%i:%i family'%(len(s1),len(s2))
+                if len(s1)<10 or len(s2)<10:
+                    continue
+                clustal_inpt_f = open(ifname,'w')
+                for g in itertools.chain(s1,s2):
+                    clustal_inpt_f.write(self.geneSequences[g])
+                clustal_inpt_f.close()
                 args = ('clustalw2','-INFILE='+ifname,'-OUTFILE='+ofname,'-OUTPUT=FASTA')
                 PIPE = subprocess.PIPE
                 proc = subprocess.Popen(args, stdin=PIPE, stdout=PIPE, stderr=stderr)
@@ -349,7 +391,9 @@ class Crawler:
                 else:
                     open(run_name+'/n_values.json','w').write(cjson.encode(n_values))
             
-
-signal.signal(signal.SIGINT, lambda a,b: exit(0))
+def ctrlc(a,b):
+    traceback.print_stack()
+    exit(0)
+signal.signal(signal.SIGINT, ctrlc)
 c = Crawler()
 c.main()
