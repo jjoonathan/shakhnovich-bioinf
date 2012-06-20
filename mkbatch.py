@@ -8,7 +8,10 @@ if len(sys.argv) != 2:
 if sys.argv[1] == '-restore':
     reverse_map = cjson.decode(sys.stdin.read())
     for fn,newn in reverse_map.iteritems():
-        os.rename(newn,fn)
+	try:
+        	os.rename(newn,fn)
+	except OSError as e:
+		print "Error: couldn't revert %s->%s"%(newn,fn)
 else:
     fnames = os.listdir('.')
     reverse_map = {}
