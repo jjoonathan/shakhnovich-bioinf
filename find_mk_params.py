@@ -337,35 +337,15 @@ class Crawler:
         if len(genes_to_fetch) == 0:
             print "All genes already fetched."
             return
-        prng = random.Random()
-        def fetch_gene(g):
-            fetchurl = 'http://www.uniprot.org/uniprot/%s.xml'%g
-            try:
-                response = urllib2.urlopen(fetchurl).read()
-                xmldoc = lxml.etree.fromstring(response)
-                xmlns = {'up':'http://uniprot.org/uniprot'}
-                seq_refs = xmldoc.xpath('//up:dbReference[@type="EMBL"]/up:property[@type="protein sequence ID"]/@value',namespaces=xmlns)
-                if len(seq_refs)==0:
-                    print "Error: %s had no associated sequence references."%g
-                    return
-            except (urllib2.HTTPError, httplib.BadStatusLine) as e:
-                print "Error '%s'->%s"%(fetchurl,e)
-                return
-            try:
-                url = "http://www.ebi.ac.uk/ena/data/view/%s&display=fasta"%(seq_refs[0],)
-                self.geneSequences[g] = urllib2.urlopen(url).read()
-            except (urllib2.HTTPError, httplib.BadStatusLine) as e:
-                print "Error2 %s %s"%(url, e)
-                return
-        downloader_pool = eventlet.greenpool.GreenPool(size=8)
-        i=0
+        self.genes_fetched=0
+        self.total_genes_to_fetch = len(genes_to_fetch)
         while len(genes_to_fetch) > 0:
+            # Chop off a chunk of 1000 genes, fetch them, write them to the output file
             current_chunk = genes_to_fetch[:1000]
             genes_to_fetch = genes_to_fetch[1000:]
             for g in downloader_pool.imap(fetch_gene, current_chunk):
                 i += 1
-                total_genes_to_fetch = len(genes_to_fetch) + len(current_chunk)
-                print "%i%% (%i/%i)\x1B[1F"%(i*100.0/total_genes_to_fetch, i, total_genes_to_fetch)
+                total_genes_to_fetch = len(genes_to_fetch) + len(current_chunk)                
             fname='%s/gene_sequences.json'%run_name
             if os.path.isfile(fname):
                 os.rename(fname,fname+'_old')
@@ -374,7 +354,42 @@ class Crawler:
             else:
                 open(fname,'w').write(cjson.encode(self.geneSequences))
         print "Done."
-            
+
+
+    def fetch_genes(genes):
+        downloader_pool = eventlet.greenpool.GreenPool(size=8)
+        while len(genes)>0:
+            pool = downloader_pool.imap(fetch_gene, list(genes))
+            genes = []
+            for success, gene in pool:
+                if not success:
+                    genes.append(gene)
+                else:
+                    self.genes_fetched += 1
+                i, tot = self.genes_fetched, self.total_genes_to_fetch
+                print "%i%% (%i/%i)\x1B[1F"%(i*100.0/tot, i, tot)
+
+    def fetch_gene(g):
+        fetchurl = 'http://www.uniprot.org/uniprot/%s.xml'%g
+        try:
+            response = urllib2.urlopen(fetchurl).read()
+            xmldoc = lxml.etree.fromstring(response)
+            xmlns = {'up':'http://uniprot.org/uniprot'}
+            seq_refs = xmldoc.xpath('//up:dbReference[@type="EMBL"]/up:property[@type="protein sequence ID"]/@value',namespaces=xmlns)
+            if len(seq_refs)==0:
+                print "Error: %s had no associated sequence references."%g
+                return
+        except Exception as e:
+            print "Error '%s'->%s"%(fetchurl,e)
+            return (False, g)
+        try:
+            url = "http://www.ebi.ac.uk/ena/data/view/%s&display=fasta"%(seq_refs[0],)
+            self.geneSequences[g] = urllib2.urlopen(url).read()
+        except Exception as e:
+            print "Error2 %s %s"%(url, e)
+            return (False, g)
+        return (True, g)
+
 ############################################# clustal #############################################               
     def align_families(self):
         print "Aligning families..."
