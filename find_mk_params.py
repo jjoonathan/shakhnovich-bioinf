@@ -1,6 +1,6 @@
 import sys, code, re, string, itertools, cPickle, urllib, lxml
 import cookielib, time, os, signal, random, traceback, subprocess
-import select, httplib
+import select, httplib, sqlite3
 
 import lxml.html                    # easy_install lxml
 import lxml.etree
@@ -14,8 +14,6 @@ import eventlet.green.subprocess as gsub
 from PyQt4.QtCore import *          # yum install PyQt4
 from PyQt4.QtGui import *
 from PyQt4.QtWebKit import QWebPage
-
-
 
 appInstance = QApplication(sys.argv)
 run_name = 'EColi-Salmonella'
@@ -45,12 +43,28 @@ class Crawler:
     geneToSpecies = {}
     geneSequences = {}
     geneFamilies = None  # A list of sets containing the proteins in that family
-    allSpecies = None
     species1Names = None
     species2Names = None
     speciesPairs = []
     malformedXMLFiles = []
     def main(self):
+        self.ensure_output_dirs_exist()
+        self.connect_to_output_db()
+        
+        self.find_species_supported_by_roundup()
+        self.determine_target_species()
+        self.build_list_of_species_pairs_to_scan_for_orthologs()
+
+        self.fetch_uncached_orthologs()
+        self.load_gene_list()
+        self.find_gene_families()
+        # self.output_gene_families()
+        self.fetch_gene_sequences()
+        self.align_families()
+        self.mktest_families()
+        exit(0)
+
+    def ensure_output_dirs_exist(self):
         if not os.path.isdir(run_name):
             os.mkdir(run_name)
 	if not os.path.isdir(run_name+'/clustalin'):
@@ -61,62 +75,54 @@ class Crawler:
             os.mkdir(run_name+'/roundup')
 	if not os.path.isdir(run_name+'/mktest_out'):
             os.mkdir(run_name+'/mktest_out')
-        self.load_species_names_list()
-        self.fetch_uncached_orthologs()
-        self.load_gene_list()
-        self.find_gene_families()
-        # self.output_gene_families()
-        self.fetch_gene_sequences()
-        self.align_families()
-        self.mktest_families()
-        exit(0)
 
-############################################# load_species_name_list #############################################
-    def load_species_names_list(self):
-        if os.path.isfile('%s/species_names.json'%run_name):
-            print "Loading cached species names..."
-            sn = cjson.decode(open('%s/species_names.json'%run_name).read())
-            self.allSpecies = sn['allSpecies']
-            self.species1Names = sn['species1Names']
-            self.species2Names = sn['species2Names']
-        else:
-            print "Fetching species names..."
-            self.webpage = QWebPage()
-            self.webpage.loadFinished.connect(self.process_organism_list)
-            self.webpage.mainFrame().load(QUrl('http://roundup.hms.harvard.edu/retrieve/'))
-            while self.allSpecies == None:
-                time.sleep(.05)
-                appInstance.processEvents()
+    def connect_to_output_db(self):
+        dbfile = run_name+'/genes.db'
+        self.db_connection = sqlite3.connect(dbfile)
+        self.db = self.db_connection.cursor()
 
-    def process_organism_list(self, bool):
-        organisms_query = 'select#id_genome_choices'
-        organisms_element = self.webpage.mainFrame().findAllElements(organisms_query).at(0)
-        elmt = organisms_element.firstChild()
-        self.allSpecies = []
+############################################# find species-species pairs to lookup in roundup #############################################
+    def find_species_supported_by_roundup(self):
+        try:
+            print "Loading list of species supported by roundup from db..."
+            self.db.execute('SELECT name FROM Species')
+            self.allSpecies = map(lambda tuple: tuple[0], self.db.fetchall())
+            return
+        except sqlite3.OperationalError:
+            pass
+        print "\x1B[1FFetching list of species supported by roundup..."
+        self.db.execute('CREATE TABLE Species (\n'+\
+                            'id INTEGER PRIMARY KEY,\n'+\
+                            'name TEXT)')
         while True:
-            if elmt == organisms_element.lastChild():
+            try:
+                result = urllib2.urlopen('http://roundup.hms.harvard.edu/retrieve/').read()
+                self.allSpecies = re.findall('{\s*"name":\s*"([^"]+)"\s*,',result)
+                allSpeciesAsSQLTuples = map(lambda i: (i,self.allSpecies[i],), xrange(len(self.allSpecies)))
+                self.db.executemany('INSERT INTO Species (id,name) VALUES (?)', allSpeciesAsSQLTuples)
+                self.db_connection.commit()
                 break
-            self.allSpecies.append(str(elmt.attribute('value')))
-            elmt = elmt.nextSibling()
+            except Exception as e:
+                print "Error: could not load gene list because: %s"%e
+                time.sleep(5)
+    
+    def determine_target_species(self):
         self.species1Names = filter(is_species_1, self.allSpecies)
         self.species2Names = filter(is_species_2, self.allSpecies)
-        s_cnt, s1_cnt, s2_cnt = len(self.allSpecies), len(self.species1Names), len(self.species2Names)
-        print "Found %i species, %i of type 1 and %i of type 2."%(s_cnt, s1_cnt, s2_cnt)
-        savedict = {'allSpecies':self.allSpecies, 'species1Names':self.species1Names, 'species2Names':self.species2Names}
-        open('%s/species_names.json'%run_name,'w').write(cjson.encode(savedict))
+        self.bridgePairs = bridges(self.species1Names, self.species2Names)
 
 ############################################# fetch_uncached_orthologs #############################################
+    def build_list_of_species_pairs_to_scan_for_orthologs(self):
+        combs1 = len(self.species1Names)*(len(self.species1Names)-1)/2
+        combs2 = len(self.species2Names)*(len(self.species2Names)-1)/2
+        self.speciesPairs.extend(self.bridgePairs)
+        self.speciesPairs.extend(itertools.combinations(self.species1Names,2))
+        self.speciesPairs.extend(itertools.combinations(self.species2Names,2))
+        print "That's %i combinations of species1, %i of species2, %i bridges."%(combs1,combs2,len(self.bridgePairs))
+        
     def fetch_uncached_orthologs(self):
         self.downloader_pool = eventlet.greenpool.GreenPool(size=5)
         self.pairs_to_download = []
-        bridge_pairs = bridges(self.species1Names, self.species2Names)
-        print "Bridges:\n\t%s"%('\n\t'.join(itertools.starmap(self.cache_name, bridge_pairs)))
-        combs1 = len(self.species1Names)*(len(self.species1Names)-1)/2
-        combs2 = len(self.species2Names)*(len(self.species2Names)-1)/2
-        self.speciesPairs.extend(bridge_pairs)
-        self.speciesPairs.extend(itertools.combinations(self.species1Names,2))
-        self.speciesPairs.extend(itertools.combinations(self.species2Names,2))
-        print "That's %i combinations of species1, %i of species2, %i bridges."%(combs1,combs2,len(bridge_pairs))
         numPairs = len(self.speciesPairs)
         for i in xrange(numPairs):
             l,r = self.speciesPairs[i]
@@ -146,6 +152,7 @@ class Crawler:
                 break
             except urllib2.URLError as e:
                 print "Error fetching (%s,%s): %s"%(lSpecies,rSpecies,e)
+                continue
         return (lSpecies,rSpecies)
 
     def attempt_fetch_pair(self, (lSpecies, rSpecies)):
@@ -182,7 +189,7 @@ class Crawler:
         xmllinks = filter(lambda s: s.find('tt=xml')!=-1, links)
         if len(xmllinks)!=1:
             print "ERROR: bad number of XML links (%s)"%xmllinks
-            return
+            return None
         # Fetch the XML file of results
         req = urllib2.Request('http://roundup.hms.harvard.edu'+xmllinks[0])
         response = opener.open(req).read()
