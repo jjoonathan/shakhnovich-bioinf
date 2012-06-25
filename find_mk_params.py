@@ -18,16 +18,21 @@ from PyQt4.QtWebKit import QWebPage
 
 
 appInstance = QApplication(sys.argv)
-run_name = 'EColi-Salmonella'
+run_name = 'EColi-Photorhabdus'
 email = 'jjoonathan@gmail.com'
+userdata = cjson.decode(urllib2.urlopen('http://amazonctrl/latest/user-data').read())
+species_1_name = userdata['species1']
+species_2_name = userdata['species2']
 def is_species_1(species_name):
-    return re.search('Escherichia', species_name) != None
+    return re.search(species_1_name, species_name) != None
 def is_species_2(species_name):
-    return re.search('Salmonella', species_name) != None
+    return re.search(species_2_name, species_name) != None
 def bridges(species1_names, species2_names):
     """ Takes two sets of strings and returns one or more (s1, s2) tuples """
-    k12 = filter(lambda s: re.search('K-12',s)!=None, species1_names)[0]
-    return [(k12, species2_names[0]), (k12, species2_names[1]), (k12, species2_names[2])]
+    s1, s2 = species1_names, species2_names
+    r = random.Random()
+    r.seed(1)
+    return [(r.choice(s1),r.choice(s2)) for i in range(3)]
 
 
 # Folders
@@ -410,19 +415,17 @@ class Crawler:
                 s1.append(g)
             else:
                 s2.append(g)
-        if len(s1)<10 or len(s2)<10:
+        if len(s1)<len(self.species1Names)/2. or len(s2)<len(self.species2Names)/2.:
             return
-        # print '+%i:%i family'%(len(s1),len(s2))
         clustal_inpt_f = open(ifname,'w')
         for g in itertools.chain(s1,s2):
             clustal_inpt_f.write(self.geneSequences.get(g,''))
         clustal_inpt_f.close()
         args = ('clustalw2','-INFILE='+ifname,'-OUTFILE='+ofname,'-OUTPUT=FASTA')
         try:
-            pass
-            #PIPE = gsub.PIPE
-            #proc = gsub.Popen(args, stdin=None, stdout=None, stderr=stderr)
-            #proc.wait()
+            PIPE = gsub.PIPE
+            proc = gsub.Popen(args, stdin=None, stdout=None, stderr=stderr)
+            proc.wait()
         except OSError as e:
             print "clustalw2 terminated: %s"%e
         self.n_values[str(familyid)] = len(s1)
@@ -459,7 +462,7 @@ class Crawler:
             if os.path.isfile(ifname):
                 print "Failed to mktest family %s (no n)."%str(familyid)
             return
-        args = ('mktest','-i',ifname,'-n',str(in_num))
+        args = ('MKtest','-i',ifname,'-n',str(in_num))
         ofile = open(ofname,'w')
         try:
             proc = gsub.Popen(args,stdout=ofile,stderr=ofile)
