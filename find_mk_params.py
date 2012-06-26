@@ -19,7 +19,7 @@ from PyQt4.QtWebKit import QWebPage
 
 appInstance = QApplication(sys.argv)
 email = 'jjoonathan@gmail.com'
-userdata = cjson.decode('{"species1":"Escherichia", "species2":"Enterobacter "}')
+userdata = cjson.decode(urllib2.urlopen('http://amazonctrl/latest/user-data').read())
 species_1_name = userdata['species1']
 species_2_name = userdata['species2']
 run_name = species_1_name+'-'+species_2_name
