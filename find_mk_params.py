@@ -18,11 +18,11 @@ from PyQt4.QtWebKit import QWebPage
 
 
 appInstance = QApplication(sys.argv)
-run_name = 'EColi-Photorhabdus'
 email = 'jjoonathan@gmail.com'
-userdata = cjson.decode(urllib2.urlopen('http://amazonctrl/latest/user-data').read())
+userdata = cjson.decode('{"species1":"Escherichia", "species2":"Enterobacter "}')
 species_1_name = userdata['species1']
 species_2_name = userdata['species2']
+run_name = species_1_name+'-'+species_2_name
 def is_species_1(species_name):
     return re.search(species_1_name, species_name) != None
 def is_species_2(species_name):
@@ -73,6 +73,7 @@ class Crawler:
         # self.output_gene_families()
         self.fetch_gene_sequences()
         self.align_families()
+	exit(0)
         self.mktest_families()
         exit(0)
 
@@ -127,6 +128,7 @@ class Crawler:
             l,r = self.speciesPairs[i]
             if i%20 == 0:
                 print "%i%% (%i/%i)\x1B[1F"%(int(i*100.0/numPairs),i,numPairs)
+                sys.stdout.flush()
             if not os.path.isfile('%s/roundup/%s.xml'%(run_name,self.cache_name(l,r))):
                 self.pairs_to_download.append((l,r))
         num_to_dl = len(self.pairs_to_download)
@@ -137,6 +139,7 @@ class Crawler:
             i+=1
             cachename = self.cache_name(*response)
             print "%i%% (%i/%i): %s\x1B[1F"%(int(i*100.0/num_to_dl), i, num_to_dl, cachename)
+            sys.stdout.flush()
 
     def cache_name(self, lSpecies, rSpecies):
         name = lSpecies+'---'+rSpecies
@@ -221,6 +224,7 @@ class Crawler:
             self.add_genes_to_list(l,r)
             if True:
                 print "%i%% (%i/%i)\x1B[1F"%(int(((i+1)*100)//total), i+1, total)
+                sys.stdout.flush()
         if self.malformedXMLFiles:
             for f in self.malformedXMLFiles:
                 os.unlink(f)
@@ -371,6 +375,7 @@ class Crawler:
                 i += 1
                 total_genes_to_fetch = len(genes_to_fetch) + len(current_chunk)
                 print "%i%% (%i/%i)\x1B[1F"%(i*100.0/total_genes_to_fetch, i, total_genes_to_fetch)
+                sys.stdout.flush()
             fname='%s/gene_sequences.json'%run_name
             if os.path.isfile(fname):
                 os.rename(fname,fname+'_old')
@@ -423,9 +428,10 @@ class Crawler:
         clustal_inpt_f.close()
         args = ('clustalw2','-INFILE='+ifname,'-OUTFILE='+ofname,'-OUTPUT=FASTA')
         try:
-            PIPE = gsub.PIPE
-            proc = gsub.Popen(args, stdin=None, stdout=None, stderr=sys.stderr)
-            proc.wait()
+            pass
+            #PIPE = gsub.PIPE
+            #proc = gsub.Popen(args, stdin=None, stdout=None, stderr=sys.stderr)
+            #proc.wait()
         except OSError as e:
             print "clustalw2 terminated: %s"%e
         self.n_values[str(familyid)] = len(s1)
