@@ -415,7 +415,7 @@ class Crawler:
                 s1.append(g)
             else:
                 s2.append(g)
-        if len(s1)<len(self.species1Names)/2. or len(s2)<len(self.species2Names)/2.:
+        if len(s1)<len(self.species1Names)/3. or len(s2)<len(self.species2Names)/3.:
             return
         clustal_inpt_f = open(ifname,'w')
         for g in itertools.chain(s1,s2):
@@ -424,7 +424,7 @@ class Crawler:
         args = ('clustalw2','-INFILE='+ifname,'-OUTFILE='+ofname,'-OUTPUT=FASTA')
         try:
             PIPE = gsub.PIPE
-            proc = gsub.Popen(args, stdin=None, stdout=None, stderr=stderr)
+            proc = gsub.Popen(args, stdin=None, stdout=None, stderr=sys.stderr)
             proc.wait()
         except OSError as e:
             print "clustalw2 terminated: %s"%e
